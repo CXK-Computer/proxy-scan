@@ -7,7 +7,7 @@ import textwrap
 import time
 
 # --- Go语言源代码 (内嵌) ---
-# 这部分Go代码保持不变，专注于核心扫描功能
+# 这部分Go代码保持不变
 GO_SOURCE_CODE = r"""
 package main
 
@@ -185,35 +185,32 @@ func formatProxyURL(task Task) string {
 # --- Python 包装器和交互逻辑 ---
 
 def styled(message, style=""):
-    """
-    【已修复】这个函数现在返回带样式的字符串，而不是直接打印。
-    """
+    """返回带样式的字符串"""
     styles = {
-        "header": "\033[95m\033[1m",  # Magenta, Bold
+        "header": "\033[95m\033[1m",
         "blue": "\033[94m",
         "green": "\033[92m",
-        "warning": "\033[93m\033[1m", # Yellow, Bold
-        "danger": "\033[91m\033[1m",  # Red, Bold
+        "warning": "\033[93m\033[1m",
+        "danger": "\033[91m\033[1m",
         "bold": "\033[1m",
         "underline": "\033[4m",
         "end": "\033[0m",
     }
     start_style = styles.get(style, "")
     end_style = styles.get("end", "")
-    # 返回格式化后的字符串
     return f"{start_style}{message}{end_style}"
 
 def check_go_installed():
     """检查Go语言环境"""
     if not shutil.which("go"):
         print(styled("\n错误: 未找到 'go' 命令。", "danger"))
-        print("请先安装Go语言环境 (>= 1.18) 并确保已将其添加到系统的PATH环境变量中。")
+        print("请先安装Go语言环境 (>= 1.18)。")
         print("官方网站: https://golang.google.cn/dl/")
         return False
     return True
 
 def get_user_input(prompt, default_value=None):
-    """获取用户输入，支持默认值"""
+    """获取用户输入"""
     if default_value:
         return input(f"{prompt} (默认: {default_value}): ") or default_value
     else:
@@ -224,7 +221,7 @@ def get_user_input(prompt, default_value=None):
             print(styled("输入不能为空，请重新输入。", "warning"))
 
 def create_example_file_if_not_exists(filename, content):
-    """如果文件不存在，则创建示例文件"""
+    """创建示例文件"""
     if not os.path.exists(filename):
         print(styled(f"\n提示: 文件 '{filename}' 不存在，为您创建一个示例。", "blue"))
         try:
@@ -244,7 +241,6 @@ def main():
 
     print(styled("\n重要警告:", "danger"))
     print("1. 本工具仅用于学习和研究网络编程，严禁用于任何非法用途。")
-    # 【已修复】现在我们先构建字符串，再打印
     warning_message = "2. " + styled("未经授权对他方网络进行扫描是违法行为。", "underline") + " 请在您自己的或授权的网络环境中进行测试。"
     print(warning_message)
     print("3. 任何因滥用本工具导致的法律后果，由使用者自行承担。")
@@ -261,9 +257,10 @@ def main():
     if not check_go_installed():
         sys.exit(1)
 
+    # --- 用户交互部分 ---
     print(styled("\n--- 第一步: 请提供代理列表文件 ---", "blue"))
     proxy_file = get_user_input("> 代理文件路径", "proxies.txt")
-    create_example_file_if_not_exists(proxy_file, "...")
+    create_example_file_if_not_exists(proxy_file, "# 请在此处填入代理地址, 格式为 ip:port, 每行一个")
 
     print(styled("\n--- 第二步: 是否使用密码本? ---", "blue"))
     use_creds = get_user_input("> 是否为需要认证的代理提供密码本? (yes/no)", "no")
@@ -271,7 +268,7 @@ def main():
     cred_file = None
     if use_creds.lower() == 'yes':
         cred_file = get_user_input("> 密码本文件路径", "credentials.txt")
-        create_example_file_if_not_exists(cred_file, "...")
+        create_example_file_if_not_exists(cred_file, "# 请在此处填入账号密码, 格式为 username:password, 每行一个")
 
     print(styled("\n--- 第三步: 配置扫描参数 ---", "blue"))
     workers = get_user_input("> 并发任务数 (推荐 50-200)", "100")
@@ -295,24 +292,41 @@ def main():
         print(styled("\n操作已取消。", "warning"))
         sys.exit(0)
 
+    # --- 准备和执行 ---
     go_source_file = "scanner_temp.go"
     exec_name = "scanner_exec.exe" if platform.system() == "Windows" else "scanner_exec"
     
     try:
+        # 【修复】为 Go 编译器设置一个明确的缓存目录，以解决 HOME 环境变量缺失的问题
+        go_cache_path = "/tmp/gocache"
+        os.environ["GOCACHE"] = go_cache_path
+        # 确保目录存在
+        os.makedirs(go_cache_path, exist_ok=True)
+        print(styled(f"提示: 已自动设置Go编译缓存目录为: {go_cache_path}", "blue"))
+
+
         with open(go_source_file, "w", encoding="utf-8") as f:
             f.write(GO_SOURCE_CODE)
 
         print(styled("\n正在编译Go扫描器...", "blue"))
-        compile_cmd = ["go", "build", "-o", exec_name, go_source_file]
-        subprocess.run(compile_cmd, check=True, capture_output=True)
+        # 使用 subprocess.run 来更好地捕获错误
+        compile_process = subprocess.run(
+            ["go", "build", "-o", exec_name, go_source_file],
+            capture_output=True, text=True, encoding='utf-8'
+        )
+        if compile_process.returncode != 0:
+            raise subprocess.CalledProcessError(
+                compile_process.returncode,
+                compile_process.args,
+                output=compile_process.stdout,
+                stderr=compile_process.stderr
+            )
         print(styled("编译成功!", "green"))
 
         command = [
             f"./{exec_name}" if platform.system() != "Windows" else exec_name,
-            "-pfile", proxy_file,
-            "-workers", workers,
-            "-timeout", timeout,
-            "-output", output_file,
+            "-pfile", proxy_file, "-workers", workers,
+            "-timeout", timeout, "-output", output_file,
         ]
         if cred_file:
             command.extend(["-cfile", cred_file])
@@ -327,18 +341,22 @@ def main():
             print(styled(f"\n⚠️ 扫描任务执行出错，退出码: {process.returncode}", "warning"))
 
     except subprocess.CalledProcessError as e:
-        print(styled("\n错误: Go程序编译或执行失败。", "danger"))
-        print(styled("--- 编译器/程序输出 ---", "danger"))
-        print(e.stderr.decode('utf-8', errors='ignore'))
-        print(styled("-----------------------", "danger"))
+        print(styled("\n错误: Go程序编译失败。", "danger"))
+        print(styled("--- 编译器输出 ---", "danger"))
+        # 打印详细的错误信息
+        print(e.stderr)
+        print(styled("--------------------", "danger"))
     except Exception as e:
         print(styled(f"\n发生未知错误: {e}", "danger"))
     finally:
         print(styled("\n🧹 正在清理临时文件...", "blue"))
-        for item in [go_source_file, exec_name, "go.mod", "go.sum"]:
+        for item in [go_source_file, exec_name]:
             if os.path.exists(item):
                 try: os.remove(item)
                 except OSError: pass
+        # 清理go.mod和go.sum（如果生成了的话）
+        if os.path.exists("go.mod"): os.remove("go.mod")
+        if os.path.exists("go.sum"): os.remove("go.sum")
         print("清理完成。")
 
 if __name__ == "__main__":
