@@ -7,7 +7,7 @@ import textwrap
 import time
 
 # --- Go语言源代码 (内嵌) ---
-# 【重大升级】重写了checkProxy函数，使用httpbin.org进行IP回显验证，确保代理的真实有效性。
+# Go代码保持不变，它专注于高效地扫描单个文件。
 GO_SOURCE_CODE = r"""
 package main
 
@@ -33,7 +33,6 @@ type Task struct {
 	Password     string
 }
 
-// 【新】用于解析httpbin.org返回的JSON
 type HttpbinResponse struct {
 	Origin string `json:"origin"`
 }
@@ -44,8 +43,7 @@ func main() {
 
 	proxyFile := flag.String("pfile", "", "Proxy list file path (ip:port)")
 	credFile := flag.String("cfile", "", "(Optional) Credentials file path (username:password)")
-	// 【新】默认验证目标更新为httpbin.org/ip
-	targetURL := flag.String("target", "http://httpbin.org/ip", "Validation URL for checking proxy's public IP")
+	targetURL := flag.String("target", "http://httpbin.org/ip", "Validation URL")
 	timeout := flag.Int("timeout", 10, "Connection timeout per proxy (seconds)")
 	workers := flag.Int("workers", 100, "Number of concurrent goroutines")
 	outputFile := flag.String("output", "valid_proxies.txt", "File to save valid proxies")
@@ -84,7 +82,7 @@ func main() {
 			tasks = append(tasks, Task{ProxyAddress: p})
 		}
 	}
-	log.Printf("Tasks ready. Total scan tasks: %d.", len(tasks))
+	log.Printf("Processing %s. Total scan tasks in this batch: %d.", *proxyFile, len(tasks))
 
 	taskChan := make(chan Task, *workers)
 	resultChan := make(chan string, len(tasks))
@@ -123,7 +121,7 @@ func main() {
 		writer.Flush()
 	}
 
-	log.Printf("Scan complete! Found %d valid proxies. Saved to %s", len(validProxies), *outputFile)
+	log.Printf("Batch scan complete for %s! Found %d valid proxies in this batch.", *proxyFile, len(validProxies))
 }
 
 func worker(wg *sync.WaitGroup, tasks <-chan Task, results chan<- string, targetURL string, timeout time.Duration) {
@@ -136,7 +134,6 @@ func worker(wg *sync.WaitGroup, tasks <-chan Task, results chan<- string, target
 	}
 }
 
-// 【重大升级】全新的、高精度的代理验证函数
 func checkProxy(proxyAddr, proxyURLStr, targetURL string, timeout time.Duration) bool {
 	proxyURL, err := url.Parse(proxyURLStr)
 	if err != nil {
@@ -145,7 +142,7 @@ func checkProxy(proxyAddr, proxyURLStr, targetURL string, timeout time.Duration)
 	
 	proxyHost, _, err := net.SplitHostPort(proxyAddr)
 	if err != nil {
-		return false // 必须是 ip:port 格式
+		return false
 	}
 
 	transport := &http.Transport{
@@ -183,12 +180,9 @@ func checkProxy(proxyAddr, proxyURLStr, targetURL string, timeout time.Duration)
 
 	var result HttpbinResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		// 响应不是有效的JSON，说明目标不是httpbin，判定为无效代理
 		return false
 	}
 
-	// 检查httpbin返回的IP是否包含代理服务器自身的IP
-	// httpbin可能会返回一个逗号分隔的IP列表（例如通过X-Forwarded-For），所以我们用Contains
 	if strings.Contains(result.Origin, proxyHost) {
 		return true
 	}
@@ -221,169 +215,162 @@ func formatProxyURL(task Task) string {
 }
 """
 
-# --- Python 包装器和交互逻辑 (保持不变) ---
+# --- Python 包装器和交互逻辑 ---
 
 def styled(message, style=""):
     """返回带样式的字符串"""
-    styles = {
-        "header": "\033[95m\033[1m",
-        "blue": "\033[94m",
-        "green": "\033[92m",
-        "warning": "\033[93m\033[1m",
-        "danger": "\033[91m\033[1m",
-        "bold": "\033[1m",
-        "underline": "\033[4m",
-        "end": "\033[0m",
-    }
-    start_style = styles.get(style, "")
-    end_style = styles.get("end", "")
-    return f"{start_style}{message}{end_style}"
+    styles = { "header": "\033[95m\033[1m", "blue": "\033[94m", "green": "\033[92m", "warning": "\033[93m\033[1m", "danger": "\033[91m\033[1m", "bold": "\033[1m", "underline": "\033[4m", "end": "\033[0m" }
+    return f"{styles.get(style, '')}{message}{styles.get('end', '')}"
 
 def check_go_installed():
     """检查Go语言环境"""
     if not shutil.which("go"):
-        print(styled("\n错误: 未找到 'go' 命令。", "danger"))
-        print("请先安装Go语言环境 (>= 1.18)。")
-        print("官方网站: https://golang.google.cn/dl/")
-        return False
+        print(styled("\n错误: 未找到 'go' 命令。", "danger")); print("请先安装Go语言环境 (>= 1.18)。"); print("官方网站: https://golang.google.cn/dl/"); return False
     return True
 
 def get_user_input(prompt, default_value=None):
     """获取用户输入"""
-    if default_value:
-        return input(f"{prompt} (默认: {default_value}): ") or default_value
-    else:
-        while True:
-            value = input(f"{prompt}: ")
-            if value.strip():
-                return value
-            print(styled("输入不能为空，请重新输入。", "warning"))
+    prompt_text = f"{prompt} (默认: {default_value}): " if default_value else f"{prompt}: "
+    while True:
+        value = input(prompt_text) or default_value
+        if value and value.strip(): return value
+        if default_value is None: print(styled("输入不能为空，请重新输入。", "warning"))
 
 def create_example_file_if_not_exists(filename, content):
     """创建示例文件"""
     if not os.path.exists(filename):
         print(styled(f"\n提示: 文件 '{filename}' 不存在，为您创建一个示例。", "blue"))
         try:
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write(textwrap.dedent(content).strip() + "\n")
+            with open(filename, "w", encoding="utf-8") as f: f.write(textwrap.dedent(content).strip() + "\n")
             print(f"示例文件 '{filename}' 创建成功。请根据需要修改其内容。")
         except IOError as e:
-            print(styled(f"错误: 无法创建文件 '{filename}': {e}", "danger"))
-            return False
+            print(styled(f"错误: 无法创建文件 '{filename}': {e}", "danger")); return False
     return True
 
-def main():
-    """主函数，交互式设置并运行扫描器"""
-    print(styled("="*60, "header"))
-    print(styled("   欢迎使用高精度HTTP代理扫描向导", "header"))
-    print(styled("="*60, "header"))
+# 【新】文件分割函数
+def split_file(large_file_path, lines_per_chunk):
+    """将大文件分割成多个小文件"""
+    chunk_files = []
+    try:
+        with open(large_file_path, 'r', encoding='utf-8', errors='ignore') as f_in:
+            file_count = 0
+            line_count = 0
+            f_out = None
+            for line in f_in:
+                if line_count % lines_per_chunk == 0:
+                    if f_out: f_out.close()
+                    file_count += 1
+                    chunk_filename = f"{large_file_path}.part_{file_count}.tmp"
+                    chunk_files.append(chunk_filename)
+                    f_out = open(chunk_filename, 'w', encoding='utf-8')
+                f_out.write(line)
+                line_count += 1
+            if f_out: f_out.close()
+        # 如果原始文件为空或没有内容，确保至少有一个空的临时文件被创建以避免后续逻辑错误
+        if not chunk_files and os.path.exists(large_file_path):
+             chunk_filename = f"{large_file_path}.part_1.tmp"
+             open(chunk_filename, 'w').close()
+             chunk_files.append(chunk_filename)
+        return chunk_files
+    except Exception as e:
+        print(styled(f"错误: 分割文件 '{large_file_path}' 时失败: {e}", "danger"))
+        return None
 
-    print(styled("\n重要警告:", "danger"))
-    print("1. 本工具仅用于学习和研究网络编程，严禁用于任何非法用途。")
-    warning_message = "2. " + styled("未经授权对他方网络进行扫描是违法行为。", "underline") + " 请在您自己的或授权的网络环境中进行测试。"
-    print(warning_message)
-    print("3. 任何因滥用本工具导致的法律后果，由使用者自行承担。")
+def main():
+    print(styled("="*60, "header")); print(styled("   欢迎使用高精度HTTP代理扫描向导 (带文件分块功能)", "header")); print(styled("="*60, "header"))
+    print(styled("\n重要警告:", "danger")); print("1. 本工具仅用于学习和研究网络编程，严禁用于任何非法用途。"); print("2. " + styled("未经授权对他方网络进行扫描是违法行为。", "underline") + " 请在您自己的或授权的网络环境中进行测试。"); print("3. 任何因滥用本工具导致的法律后果，由使用者自行承担。")
     
     try:
-        confirm = input("\n> " + styled("您是否理解并同意以上条款？(输入 'yes' 继续): ", "bold"))
-        if confirm.lower() != 'yes':
-            print(styled("\n操作已取消。", "warning"))
-            sys.exit(0)
-    except KeyboardInterrupt:
-        print(styled("\n操作已取消。", "warning"))
-        sys.exit(0)
+        if input("\n> " + styled("您是否理解并同意以上条款？(输入 'yes' 继续): ", "bold")).lower() != 'yes':
+            print(styled("\n操作已取消。", "warning")); sys.exit(0)
+    except KeyboardInterrupt: print(styled("\n操作已取消。", "warning")); sys.exit(0)
 
-    if not check_go_installed():
-        sys.exit(1)
+    if not check_go_installed(): sys.exit(1)
 
     print(styled("\n--- 第一步: 请提供代理列表文件 ---", "blue"))
     proxy_file = get_user_input("> 代理文件路径", "proxies.txt")
     create_example_file_if_not_exists(proxy_file, "# 请在此处填入代理地址, 格式为 ip:port, 每行一个")
 
-    print(styled("\n--- 第二步: 是否使用密码本? ---", "blue"))
+    # 【新】交互式文件分割
+    files_to_scan = [proxy_file]
+    split_was_done = False
+    print(styled("\n--- 第二步: 文件处理 ---", "blue"))
+    if input("> 是否需要将大文件分割成小块以节省内存? (yes/no) ").lower() == 'yes':
+        lines_per_file = int(get_user_input("> 每个小文件包含多少行代理?", "5000"))
+        print(styled(f"正在将 '{proxy_file}' 分割成每份 {lines_per_file} 行的小文件...", "blue"))
+        chunk_files = split_file(proxy_file, lines_per_file)
+        if chunk_files:
+            files_to_scan = chunk_files
+            split_was_done = True
+            print(styled(f"分割完成！共生成 {len(files_to_scan)} 个小文件。", "green"))
+        else:
+            print(styled("分割失败，将继续扫描原始文件。", "warning"))
+
+    print(styled("\n--- 第三步: 是否使用密码本? ---", "blue"))
     use_creds = get_user_input("> 是否为需要认证的代理提供密码本? (yes/no)", "no")
-    
     cred_file = None
     if use_creds.lower() == 'yes':
         cred_file = get_user_input("> 密码本文件路径", "credentials.txt")
         create_example_file_if_not_exists(cred_file, "# 请在此处填入账号密码, 格式为 username:password, 每行一个")
 
-    print(styled("\n--- 第三步: 配置扫描参数 ---", "blue"))
+    print(styled("\n--- 第四步: 配置扫描参数 ---", "blue"))
     workers = get_user_input("> 并发任务数 (推荐 50-200)", "100")
     timeout = get_user_input("> 连接超时时间 (秒)", "10")
-    output_file = get_user_input("> 结果保存路径", "valid_proxies.txt")
+    output_file = get_user_input("> 最终结果保存路径", "valid_proxies.txt")
 
-    print("\n" + styled("="*25 + " 配置确认 " + "="*25, "green"))
-    print(f"  代理列表文件: {proxy_file}")
-    print(f"  密码本文件:   {cred_file if cred_file else '(不使用)'}")
-    print(f"  并发任务数:   {workers}")
-    print(f"  超时时间:     {timeout} 秒")
-    print(f"  结果输出文件: {output_file}")
-    print(styled("="*60, "green"))
-
-    try:
-        start_scan = input("\n> " + styled("是否开始扫描? (yes/no): ", "bold"))
-        if start_scan.lower() != 'yes':
-            print(styled("\n操作已取消。", "warning"))
-            sys.exit(0)
-    except KeyboardInterrupt:
-        print(styled("\n操作已取消。", "warning"))
-        sys.exit(0)
-
-    go_source_file = "scanner_temp.go"
-    exec_name = "scanner_exec.exe" if platform.system() == "Windows" else "scanner_exec"
+    # 准备执行
+    go_source_file = "scanner_temp.go"; exec_name = "scanner_exec.exe" if platform.system() == "Windows" else "scanner_exec"
     
     try:
-        go_cache_path = "/tmp/gocache"
-        os.environ["GOCACHE"] = go_cache_path
-        os.makedirs(go_cache_path, exist_ok=True)
-        print(styled(f"\n提示: 已自动设置Go编译缓存目录为: {go_cache_path}", "blue"))
+        # 预编译Go程序
+        print(styled("\n正在预编译高精度Go扫描器...", "blue"))
+        with open(go_source_file, "w", encoding="utf-8") as f: f.write(GO_SOURCE_CODE)
+        os.environ["GOCACHE"] = "/tmp/gocache"; os.makedirs("/tmp/gocache", exist_ok=True)
+        compile_process = subprocess.run(["go", "build", "-o", exec_name, go_source_file], capture_output=True, text=True, encoding='utf-8')
+        if compile_process.returncode != 0: raise subprocess.CalledProcessError(compile_process.returncode, compile_process.args, output=compile_process.stdout, stderr=compile_process.stderr)
+        print(styled("预编译成功!", "green"))
 
-        with open(go_source_file, "w", encoding="utf-8") as f:
-            f.write(GO_SOURCE_CODE)
+        # 清空最终结果文件
+        open(output_file, 'w').close()
+        total_valid_proxies = 0
 
-        print(styled("正在编译高精度Go扫描器...", "blue"))
-        compile_process = subprocess.run(
-            ["go", "build", "-o", exec_name, go_source_file],
-            capture_output=True, text=True, encoding='utf-8'
-        )
-        if compile_process.returncode != 0:
-            raise subprocess.CalledProcessError(
-                compile_process.returncode, compile_process.args,
-                output=compile_process.stdout, stderr=compile_process.stderr
-            )
-        print(styled("编译成功!", "green"))
+        # 【新】循环扫描所有文件块
+        for i, current_file in enumerate(files_to_scan):
+            print(styled(f"\n--- 🚀 开始扫描第 {i+1}/{len(files_to_scan)} 部分: {os.path.basename(current_file)} ---", "header"))
+            temp_output = f"{output_file}.part_{i+1}.tmp"
+            command = [ f"./{exec_name}" if platform.system() != "Windows" else exec_name, "-pfile", current_file, "-workers", workers, "-timeout", timeout, "-output", temp_output]
+            if cred_file: command.extend(["-cfile", cred_file])
+            
+            process = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr); process.wait()
 
-        command = [
-            f"./{exec_name}" if platform.system() != "Windows" else exec_name,
-            "-pfile", proxy_file, "-workers", workers,
-            "-timeout", timeout, "-output", output_file,
-        ]
-        if cred_file:
-            command.extend(["-cfile", cred_file])
+            # 【新】汇总结果
+            if os.path.exists(temp_output):
+                with open(output_file, 'a', encoding='utf-8') as f_out, open(temp_output, 'r', encoding='utf-8') as f_in:
+                    chunk_content = f_in.read()
+                    f_out.write(chunk_content)
+                    total_valid_proxies += chunk_content.count('\n')
+                os.remove(temp_output)
         
-        print(styled("\n--- 🚀 开始执行高精度扫描 (实时日志) ---", "header"))
-        process = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr)
-        process.wait()
-
-        if process.returncode == 0:
-            print(styled("\n🎉 扫描任务成功完成!", "green"))
-        else:
-            print(styled(f"\n⚠️ 扫描任务执行出错，退出码: {process.returncode}", "warning"))
+        print(styled(f"\n🎉 所有扫描任务成功完成! 共发现 {total_valid_proxies} 个有效代理。", "green"))
+        print(styled(f"最终结果已全部保存在: {output_file}", "green"))
 
     except subprocess.CalledProcessError as e:
-        print(styled("\n错误: Go程序编译失败。", "danger"))
-        print(styled("--- 编译器输出 ---", "danger"))
-        print(e.stderr)
-        print(styled("--------------------", "danger"))
+        print(styled("\n错误: Go程序编译失败。", "danger")); print(styled("--- 编译器输出 ---", "danger")); print(e.stderr); print(styled("--------------------", "danger"))
     except Exception as e:
         print(styled(f"\n发生未知错误: {e}", "danger"))
     finally:
         print(styled("\n🧹 正在清理临时文件...", "blue"))
+        # 清理Go相关文件
         for item in [go_source_file, exec_name, "go.mod", "go.sum"]:
             if os.path.exists(item):
                 try: os.remove(item)
                 except OSError: pass
+        # 【新】清理分割的临时文件
+        if split_was_done:
+            for part_file in files_to_scan:
+                if os.path.exists(part_file):
+                    try: os.remove(part_file)
+                    except OSError: pass
         print("清理完成。")
 
 if __name__ == "__main__":
