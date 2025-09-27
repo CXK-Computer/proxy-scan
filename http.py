@@ -7,14 +7,16 @@ import textwrap
 import time
 
 # --- Go语言源代码 (内嵌) ---
-# 这部分Go代码保持不变
+# 【重大升级】重写了checkProxy函数，使用httpbin.org进行IP回显验证，确保代理的真实有效性。
 GO_SOURCE_CODE = r"""
 package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -31,13 +33,19 @@ type Task struct {
 	Password     string
 }
 
+// 【新】用于解析httpbin.org返回的JSON
+type HttpbinResponse struct {
+	Origin string `json:"origin"`
+}
+
 func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.Ltime)
 
 	proxyFile := flag.String("pfile", "", "Proxy list file path (ip:port)")
 	credFile := flag.String("cfile", "", "(Optional) Credentials file path (username:password)")
-	targetURL := flag.String("target", "http://www.baidu.com/", "URL to test proxies")
+	// 【新】默认验证目标更新为httpbin.org/ip
+	targetURL := flag.String("target", "http://httpbin.org/ip", "Validation URL for checking proxy's public IP")
 	timeout := flag.Int("timeout", 10, "Connection timeout per proxy (seconds)")
 	workers := flag.Int("workers", 100, "Number of concurrent goroutines")
 	outputFile := flag.String("output", "valid_proxies.txt", "File to save valid proxies")
@@ -99,7 +107,7 @@ func main() {
 		close(resultChan)
 	}()
 
-	log.Println("Scanning started...")
+	log.Println("Scanning started with high-accuracy validation...")
 	var validProxies []string
 	outFile, err := os.Create(*outputFile)
 	if err != nil {
@@ -109,7 +117,7 @@ func main() {
 
 	writer := bufio.NewWriter(outFile)
 	for result := range resultChan {
-		log.Printf("✅ Valid proxy found: %s", result)
+		log.Printf("✅ High-accuracy valid proxy found: %s", result)
 		validProxies = append(validProxies, result)
 		fmt.Fprintln(writer, result)
 		writer.Flush()
@@ -122,39 +130,70 @@ func worker(wg *sync.WaitGroup, tasks <-chan Task, results chan<- string, target
 	defer wg.Done()
 	for task := range tasks {
 		fullProxyURL := formatProxyURL(task)
-		if checkProxy(fullProxyURL, targetURL, timeout) {
+		if checkProxy(task.ProxyAddress, fullProxyURL, targetURL, timeout) {
 			results <- fullProxyURL
 		}
 	}
 }
 
-func checkProxy(proxyURLStr, targetURL string, timeout time.Duration) bool {
+// 【重大升级】全新的、高精度的代理验证函数
+func checkProxy(proxyAddr, proxyURLStr, targetURL string, timeout time.Duration) bool {
 	proxyURL, err := url.Parse(proxyURLStr)
 	if err != nil {
 		return false
 	}
+	
+	proxyHost, _, err := net.SplitHostPort(proxyAddr)
+	if err != nil {
+		return false // 必须是 ip:port 格式
+	}
+
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
 		DialContext: (&net.Dialer{
 			Timeout:   timeout,
 		}).DialContext,
-		TLSHandshakeTimeout:   timeout,
+		TLSHandshakeTimeout: timeout,
 	}
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   timeout + (5 * time.Second),
 	}
+
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
 		return false
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.93 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return false
+	}
+
+	var result HttpbinResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		// 响应不是有效的JSON，说明目标不是httpbin，判定为无效代理
+		return false
+	}
+
+	// 检查httpbin返回的IP是否包含代理服务器自身的IP
+	// httpbin可能会返回一个逗号分隔的IP列表（例如通过X-Forwarded-For），所以我们用Contains
+	if strings.Contains(result.Origin, proxyHost) {
+		return true
+	}
+
+	return false
 }
 
 func readLines(path string) ([]string, error) {
@@ -182,7 +221,7 @@ func formatProxyURL(task Task) string {
 }
 """
 
-# --- Python 包装器和交互逻辑 ---
+# --- Python 包装器和交互逻辑 (保持不变) ---
 
 def styled(message, style=""):
     """返回带样式的字符串"""
@@ -236,7 +275,7 @@ def create_example_file_if_not_exists(filename, content):
 def main():
     """主函数，交互式设置并运行扫描器"""
     print(styled("="*60, "header"))
-    print(styled("   欢迎使用交互式HTTP代理扫描向导 (教育版)", "header"))
+    print(styled("   欢迎使用高精度HTTP代理扫描向导", "header"))
     print(styled("="*60, "header"))
 
     print(styled("\n重要警告:", "danger"))
@@ -257,7 +296,6 @@ def main():
     if not check_go_installed():
         sys.exit(1)
 
-    # --- 用户交互部分 ---
     print(styled("\n--- 第一步: 请提供代理列表文件 ---", "blue"))
     proxy_file = get_user_input("> 代理文件路径", "proxies.txt")
     create_example_file_if_not_exists(proxy_file, "# 请在此处填入代理地址, 格式为 ip:port, 每行一个")
@@ -292,34 +330,27 @@ def main():
         print(styled("\n操作已取消。", "warning"))
         sys.exit(0)
 
-    # --- 准备和执行 ---
     go_source_file = "scanner_temp.go"
     exec_name = "scanner_exec.exe" if platform.system() == "Windows" else "scanner_exec"
     
     try:
-        # 【修复】为 Go 编译器设置一个明确的缓存目录，以解决 HOME 环境变量缺失的问题
         go_cache_path = "/tmp/gocache"
         os.environ["GOCACHE"] = go_cache_path
-        # 确保目录存在
         os.makedirs(go_cache_path, exist_ok=True)
-        print(styled(f"提示: 已自动设置Go编译缓存目录为: {go_cache_path}", "blue"))
-
+        print(styled(f"\n提示: 已自动设置Go编译缓存目录为: {go_cache_path}", "blue"))
 
         with open(go_source_file, "w", encoding="utf-8") as f:
             f.write(GO_SOURCE_CODE)
 
-        print(styled("\n正在编译Go扫描器...", "blue"))
-        # 使用 subprocess.run 来更好地捕获错误
+        print(styled("正在编译高精度Go扫描器...", "blue"))
         compile_process = subprocess.run(
             ["go", "build", "-o", exec_name, go_source_file],
             capture_output=True, text=True, encoding='utf-8'
         )
         if compile_process.returncode != 0:
             raise subprocess.CalledProcessError(
-                compile_process.returncode,
-                compile_process.args,
-                output=compile_process.stdout,
-                stderr=compile_process.stderr
+                compile_process.returncode, compile_process.args,
+                output=compile_process.stdout, stderr=compile_process.stderr
             )
         print(styled("编译成功!", "green"))
 
@@ -331,7 +362,7 @@ def main():
         if cred_file:
             command.extend(["-cfile", cred_file])
         
-        print(styled("\n--- 🚀 开始执行扫描 (实时日志) ---", "header"))
+        print(styled("\n--- 🚀 开始执行高精度扫描 (实时日志) ---", "header"))
         process = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr)
         process.wait()
 
@@ -343,20 +374,16 @@ def main():
     except subprocess.CalledProcessError as e:
         print(styled("\n错误: Go程序编译失败。", "danger"))
         print(styled("--- 编译器输出 ---", "danger"))
-        # 打印详细的错误信息
         print(e.stderr)
         print(styled("--------------------", "danger"))
     except Exception as e:
         print(styled(f"\n发生未知错误: {e}", "danger"))
     finally:
         print(styled("\n🧹 正在清理临时文件...", "blue"))
-        for item in [go_source_file, exec_name]:
+        for item in [go_source_file, exec_name, "go.mod", "go.sum"]:
             if os.path.exists(item):
                 try: os.remove(item)
                 except OSError: pass
-        # 清理go.mod和go.sum（如果生成了的话）
-        if os.path.exists("go.mod"): os.remove("go.mod")
-        if os.path.exists("go.sum"): os.remove("go.sum")
         print("清理完成。")
 
 if __name__ == "__main__":
