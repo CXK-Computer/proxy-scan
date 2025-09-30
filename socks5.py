@@ -9,7 +9,7 @@ import atexit
 from datetime import datetime
 
 # --- GO 语言核心代码 1: 全功能认证扫描器 ---
-# (Go code remains unchanged, as the logic is sound)
+# (Go code remains unchanged)
 GO_SOURCE_CODE_SCANNER = r'''
 package main
 
@@ -190,9 +190,9 @@ func main() {
 }
 '''
 
-# --- Python 交互式包装器 (IO优化版) ---
+# --- Python 交互式包装器 (环境自适应版) ---
 
-# 全局变量，用于存放编译好的Go程序路径和临时目录
+# 全局变量
 COMPILED_BINARIES = {}
 TEMP_DIR = None
 
@@ -208,46 +208,85 @@ def get_validated_input(prompt, validation_func, error_message):
 def validate_file_exists(path): return os.path.exists(path)
 def validate_positive_integer(num_str): return num_str.isdigit() and int(num_str) > 0
 
+def get_go_executable_path():
+    """智能查找go可执行文件的完整路径，并处理潜在的环境问题"""
+    go_exec = shutil.which("go")
+    if go_exec:
+        return go_exec
+    
+    # 如果在标准PATH中找不到，尝试一些常见路径
+    common_paths = ["/usr/local/go/bin/go", "/usr/bin/go", "C:\\Go\\bin\\go.exe"]
+    for path in common_paths:
+        if os.path.exists(path):
+            print(f"提示: 在标准PATH中未找到'go', 但在'{path}'处发现。")
+            return path
+    return None
+
+def setup_go_environment(temp_dir):
+    """为Go子进程创建健壮的环境变量"""
+    # 复制当前环境
+    env = os.environ.copy()
+    
+    # 关键修复: 确保HOME和GOCACHE被定义
+    # 1. 优先使用现有的HOME, 如果不存在, 则指向临时目录以确保Go可以工作
+    if "HOME" not in env or not env["HOME"]:
+        env["HOME"] = temp_dir
+        print(f"提示: 未检测到 $HOME 环境变量, 临时设置为 '{temp_dir}'")
+    
+    # 2. 为GOCACHE设置一个明确的路径, 存放在临时目录中
+    gocache_path = os.path.join(temp_dir, ".gocache")
+    os.makedirs(gocache_path, exist_ok=True)
+    env["GOCACHE"] = gocache_path
+    
+    return env
+
 def compile_go_binaries():
     """在脚本启动时预编译所有Go程序"""
     global TEMP_DIR, COMPILED_BINARIES
-    if not shutil.which("go"):
-        print("\n错误: 未找到 'go' 命令。请先安装 Go 语言环境。")
+    
+    go_executable = get_go_executable_path()
+    if not go_executable:
+        print("\n错误: 在您的系统中找不到 'go' 命令。请确保Go语言已正确安装并配置到PATH。")
         sys.exit(1)
     
     try:
         TEMP_DIR = tempfile.mkdtemp(prefix="socks5_toolkit_build_")
-        # 注册退出时清理临时目录的函数
         atexit.register(cleanup_temp_dir)
+        
+        # 为编译过程设置健壮的环境变量
+        compile_env = setup_go_environment(TEMP_DIR)
         
         print("正在后台预编译Go核心程序，请稍候...")
         
-        sources = {
-            "scanner": GO_SOURCE_CODE_SCANNER,
-            "filter": GO_SOURCE_CODE_FILTER,
-        }
+        sources = {"scanner": GO_SOURCE_CODE_SCANNER, "filter": GO_SOURCE_CODE_FILTER}
         
         for name, code in sources.items():
             source_path = os.path.join(TEMP_DIR, f"{name}.go")
-            # 根据操作系统确定可执行文件名
             exe_name = f"{name}.exe" if sys.platform == "win32" else name
             output_path = os.path.join(TEMP_DIR, exe_name)
             
-            with open(source_path, "w", encoding="utf-8") as f:
-                f.write(code)
+            with open(source_path, "w", encoding="utf-8") as f: f.write(code)
             
-            # 使用 'go build' 进行编译
-            subprocess.run(
-                ["go", "build", "-o", output_path, source_path],
-                check=True, capture_output=True, text=True
+            cmd = [go_executable, "build", "-o", output_path, source_path]
+            # 使用我们创建的健壮环境来执行编译
+            result = subprocess.run(
+                cmd, env=compile_env, check=True, capture_output=True, text=True, encoding='utf-8', errors='replace'
             )
             COMPILED_BINARIES[name] = output_path
         
         print("预编译完成，工具已就绪。")
         return True
-    except (subprocess.CalledProcessError, Exception) as e:
+    except subprocess.CalledProcessError as e:
         print(f"\nGo程序编译失败: {e}")
-        if hasattr(e, 'stderr'): print(e.stderr)
+        # 打印详细的错误输出以便调试
+        print("\n--- Go编译器错误信息 ---")
+        print(e.stdout)
+        print(e.stderr)
+        print("--------------------------")
+        cleanup_temp_dir()
+        return False
+    except Exception as e:
+        print(f"\n发生了一个意外错误: {e}")
         cleanup_temp_dir()
         return False
 
@@ -264,7 +303,6 @@ def run_go_executable(executable_name, args_list):
     if not executable_path:
         print(f"错误: 未找到名为 '{executable_name}' 的已编译程序。")
         return
-        
     try:
         cmd = [executable_path] + args_list
         print("\n--- 正在执行 Go 高性能核心 ---")
@@ -275,14 +313,12 @@ def run_go_executable(executable_name, args_list):
         for line in iter(process.stdout.readline, ''): print(line.strip())
         process.wait()
         print("--- 任务执行完毕 ---")
-    except Exception as e:
-        print(f"执行Go程序时发生意外错误: {e}")
+    except Exception as e: print(f"执行Go程序时发生意外错误: {e}")
 
 def ask_and_split_file(input_path, output_dir):
     """询问并执行文件分割，将分割文件存入指定的输出目录"""
     choice = input(f"文件 '{os.path.basename(input_path)}' 是否需要分割成小文件再处理? (y/n): ").lower()
-    if choice != 'y':
-        return [input_path]
+    if choice != 'y': return [input_path]
     
     lines_per_file_str = get_validated_input("每个小文件行数 (默认1000): ", lambda x: x=="" or validate_positive_integer(x), "请输入正整数。") or "1000"
     try:
@@ -290,8 +326,7 @@ def ask_and_split_file(input_path, output_dir):
         if not lines: print("文件为空。"); return [input_path]
         
         total_lines, lines_per_file = len(lines), int(lines_per_file_str)
-        if total_lines <= lines_per_file:
-            print("文件行数不足，无需分割。"); return [input_path]
+        if total_lines <= lines_per_file: print("文件行数不足，无需分割。"); return [input_path]
 
         num_files = math.ceil(total_lines / lines_per_file)
         print(f"\n总计 {total_lines} 行，将被分割成 {num_files} 个文件。")
@@ -299,15 +334,12 @@ def ask_and_split_file(input_path, output_dir):
         
         new_file_paths = []
         for i in range(num_files):
-            # 将分割文件创建在指定的输出目录中
             output_path = os.path.join(output_dir, f"{file_base}_part_{i+1}{file_ext}")
-            with open(output_path, 'w', encoding='utf-8') as f_out:
-                f_out.writelines(lines[i*lines_per_file:(i+1)*lines_per_file])
+            with open(output_path, 'w', encoding='utf-8') as f_out: f_out.writelines(lines[i*lines_per_file:(i+1)*lines_per_file])
             print(f"已生成文件: {output_path}")
             new_file_paths.append(output_path)
         return new_file_paths
-    except Exception as e: 
-        print(f"处理文件时出错: {e}"); return [input_path]
+    except Exception as e: print(f"处理文件时出错: {e}"); return [input_path]
 
 def handle_full_scan(output_dir):
     print_header("全功能认证扫描")
@@ -318,7 +350,6 @@ def handle_full_scan(output_dir):
     if use_dict == 'y': dict_file = get_validated_input("请输入密码本文件路径: ", validate_file_exists, "文件不存在。")
     threads = get_validated_input("并发数 (默认100): ", lambda x: x=="" or validate_positive_integer(x), "请输入正整数。") or "100"
     timeout = get_validated_input("超时(秒, 默认5): ", lambda x: x=="" or validate_positive_integer(x), "请输入正整数。") or "5"
-
     for file_path in files_to_scan:
         print(f"\n--- 正在扫描文件: {os.path.basename(file_path)} ---")
         cmd_args = ["-proxyFile", file_path, "-threads", threads, "-timeout", timeout]
@@ -331,31 +362,23 @@ def handle_proxy_filtering(output_dir):
     files_to_filter = ask_and_split_file(input_file, output_dir)
     threads = get_validated_input("并发数 (默认200): ", lambda x: x=="" or validate_positive_integer(x), "请输入正整数。") or "200"
     timeout = get_validated_input("超时(秒, 默认5): ", lambda x: x=="" or validate_positive_integer(x), "请输入正整数。") or "5"
-    
     for file_path in files_to_filter:
         print(f"\n--- 正在筛选文件: {os.path.basename(file_path)} ---")
         base, ext = os.path.splitext(os.path.basename(file_path))
-        # 将输出文件也创建在指定的输出目录中
         output_file_path = os.path.join(output_dir, f"{base}_valid{ext}")
         print(f"筛选结果将保存至: {output_file_path}")
-        
         cmd_args = ["-inputFile", file_path, "-outputFile", output_file_path, "-threads", threads, "-timeout", timeout]
         run_go_executable("filter", cmd_args)
 
 def main():
-    if not compile_go_binaries():
-        sys.exit(1)
-        
-    # 创建本次会话的专属输出目录
+    if not compile_go_binaries(): sys.exit(1)
     session_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_dir = f"toolkit_session_{session_timestamp}"
     os.makedirs(output_dir, exist_ok=True)
-    
     print("\n" + "*"*60)
-    print(" " * 12 + "SOCKS5 高效工作流工具箱 (IO优化版)")
+    print(" " * 12 + "SOCKS5 健壮工作流工具箱 (环境自适应版)")
     print(f"--- 本次会话所有输出文件将保存在: '{output_dir}' 目录 ---")
     print("*"*60)
-
     while True:
         print("\n--- 主菜单 ---")
         print("  [1] 全功能认证扫描 (尝试登录)")
