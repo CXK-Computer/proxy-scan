@@ -39,7 +39,7 @@ async def fetch_check(session: aiohttp.ClientSession, api_base: str, proxy_str: 
                 data = await resp.json(content_type=None)
             except Exception:
                 data = {"_raw": await resp.text(), "_status": resp.status}
-            success = bool(isinstance(data, dict) 和 (data.get("success") is True or data.get("status") == "ok" or 200 <= resp.status < 300))
+            success = bool(isinstance(data, dict) and (data.get("success") is True or data.get("status") == "ok" or 200 <= resp.status < 300))
             return proxy_str, success, data
     except Exception as e:
         return proxy_str, False, {"error": str(e)}
@@ -55,7 +55,7 @@ async def run_batch(proxies, api_base, concurrency, timeout, extra_params):
                 if ok:
                     results.append((proxy_str, ok, data))
         tasks = [asyncio.create_task(worker(p)) for p in proxies]
-        with tqdm(total=len(tasks), desc="Checking"， unit="proxy") as pbar:
+        with tqdm(total=len(tasks), desc="Checking", unit="proxy") as pbar:
             for f in asyncio.as_completed(tasks):
                 await f
                 pbar.update(1)
