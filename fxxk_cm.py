@@ -1,12 +1,3 @@
-# interactive_proxy_checker.py
-# 大规模代理检测器（流式/分布式支持）
-# 功能:
-# - 流式读取超大代理文件，不占满内存
-# - 批量落盘，每处理 N 条(默认10万)保存一次
-# - 自动分片文件命名，防止生成超大JSON/CSV
-# - 支持分布式运行，可指定起止行处理子集
-# - 仅保存可用代理 (ok=True)
-
 import asyncio
 import json
 import os
