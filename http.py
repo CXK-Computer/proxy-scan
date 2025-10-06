@@ -212,52 +212,42 @@ def find_go_executable():
         if manual_path and os.path.exists(manual_path) and os.access(manual_path, os.X_OK): return manual_path
         else: print(styled(f"路径 '{manual_path}' 无效，请重新输入。", "warning"))
 
-# --- 新增功能: 密码本格式处理 ---
+# --- 更新功能: 智能密码本格式处理 ---
 def process_credentials(input_file):
     """
-    自动检测凭据文件格式并根据需要进行转换。
-    格式1 ('user:pass') 直接使用。
-    格式2 (用户名和密码分两行) 会被转换为格式1并存入临时文件。
+    智能处理凭据文件，自动将其转换为Go程序所需的'username:password'格式。
+    - 如果一行包含':'，则认为它是 'user:pass' 格式，直接使用。
+    - 如果一行不含':'，则认为该行内容同时是用户名和密码 (e.g., 'admin' -> 'admin:admin')。
     返回一个可供Go程序使用的凭据文件路径和一个用于清理的临时文件名。
     """
     if not os.path.exists(input_file):
         print(styled(f"错误: 凭据文件 '{input_file}' 不存在。", "danger"))
         return None, None
     
-    # 通过检查第一有效行是否包含':'来自动检测格式
-    is_twoline_format = True
-    try:
-        with open(input_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    if ':' in line:
-                        is_twoline_format = False
-                    break 
-    except Exception as e:
-        print(styled(f"读取凭据文件 '{input_file}' 时出错: {e}", "danger"))
-        return None, None
-
-    if not is_twoline_format:
-        print(styled("检测到凭据格式为 'username:password'，无需转换。", "green"))
-        return input_file, None 
-
-    # 格式2，需要转换
-    print(styled("检测到凭据格式为 '用户名/密码' 分行格式，正在转换...", "blue"))
+    print(styled("正在处理凭据文件，将统一转换为 'username:password' 格式...", "blue"))
     temp_file_path = "temp_credentials_converted.txt"
+    lines_processed = 0
     try:
-        with open(input_file, 'r', encoding='utf-8') as f_in, \
+        with open(input_file, 'r', encoding='utf-8', errors='ignore') as f_in, \
              open(temp_file_path, 'w', encoding='utf-8') as f_out:
-            lines = [line.strip() for line in f_in if line.strip() and not line.startswith('#')]
-            if len(lines) % 2 != 0:
-                print(styled(f"警告: 凭据文件 '{input_file}' 有效行数不是偶数，最后一行将被忽略。", "warning"))
+            for line in f_in:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
 
-            # 假设奇数行为用户名，偶数行为密码 (e.g., admin, 123456)
-            for i in range(0, len(lines) - 1, 2):
-                username = lines[i]
-                password = lines[i+1]
-                f_out.write(f"{username}:{password}\n")
-        print(styled(f"转换成功, 临时文件: {temp_file_path}", "green"))
+                if ':' in line:
+                    # 格式1: 'username:password'，直接写入
+                    f_out.write(line + '\n')
+                else:
+                    # 格式2: 单个值，用作用户名和密码
+                    f_out.write(f"{line}:{line}\n")
+                lines_processed += 1
+
+        if lines_processed == 0:
+            print(styled(f"警告: 凭据文件 '{input_file}' 为空或只包含注释，本次扫描将不使用密码本。", "warning"))
+            return None, None
+
+        print(styled(f"凭据文件处理完成, 临时文件: {temp_file_path}", "green"))
         return temp_file_path, temp_file_path
     except Exception as e:
         print(styled(f"转换凭据文件时出错: {e}", "danger"))
@@ -329,17 +319,19 @@ def main():
     temp_cred_file = None 
     if get_user_input("> 是否使用密码本? (yes/no)", "no").lower() == 'yes':
         original_cred_file = get_user_input("> 请输入密码本文件路径", "credentials.txt")
-        create_example_file_if_not_exists(original_cred_file, """# 请在此处填入账号密码。程序会自动检测格式。
+        # 更新了示例文件内容，以反映新的处理逻辑
+        create_example_file_if_not_exists(original_cred_file, """# 请在此处填入账号密码。程序会自动处理以下两种格式:
+#
 # 格式1: username:password (每行一个)
 # user1:pass1
-# 
-# 格式2: 用户名和密码交替 (奇数行为用户名, 偶数行为密码)
-# admin
-# 123456
+#
+# 格式2: 每行一个值，该值同时用作用户名和密码
+# admin  (程序会处理成 admin:admin)
+# 123456 (程序会处理成 123456:123456)
 """)
         cred_file, temp_cred_file = process_credentials(original_cred_file)
         if not cred_file:
-             print(styled("由于凭据文件处理失败, 本次扫描将不使用密码本。", "warning"))
+             print(styled("由于凭据文件处理失败或为空, 本次扫描将不使用密码本。", "warning"))
 
     print(styled("\n--- 第四步: 扫描参数 ---", "blue"))
     workers = get_user_input("> 请输入并发任务数", "100")
