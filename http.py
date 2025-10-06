@@ -7,12 +7,8 @@ import textwrap
 import time
 import base64
 import datetime
-# 新功能需要 requests 库，请确保已安装 (pip install requests)
-try:
-    import requests
-except ImportError:
-    print("\n错误：缺少 requests 库。请运行 'pip install requests' 进行安装。")
-    sys.exit(1)
+import requests
+
 
 
 # --- Go语言源代码 (内嵌) ---
