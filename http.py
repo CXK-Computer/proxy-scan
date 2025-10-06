@@ -7,12 +7,11 @@ import textwrap
 import time
 import base64
 import datetime
-# 新功能需要以下库，请确保已安装 (pip install requests pyyaml)
+# 新功能需要 requests 库，请确保已安装 (pip install requests)
 try:
     import requests
-    import yaml
 except ImportError:
-    print("\n错误：缺少必要的库。请运行 'pip install requests pyyaml' 进行安装。")
+    print("\n错误：缺少 requests 库。请运行 'pip install requests' 进行安装。")
     sys.exit(1)
 
 
@@ -280,18 +279,36 @@ def get_vps_info():
         return data.get('query', 'N/A'), data.get('country', 'N/A')
     except Exception: return "N/A", "N/A"
 
+# --- 已更新: get_nezha_server 函数不再使用 PyYAML ---
 def get_nezha_server(config_file="config.yml"):
-    if not os.path.exists(config_file): return "N/A"
+    """
+    从 config.yml 文件中读取 'server' 的值，不依赖 PyYAML 库。
+    """
+    if not os.path.exists(config_file):
+        return "N/A"
     try:
         with open(config_file, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f).get('server', 'N/A')
-    except Exception: return "N/A"
-
+            for line in f:
+                # 去除行首尾的空白字符
+                clean_line = line.strip()
+                # 检查是否是我们想要的行
+                if clean_line.startswith('server:'):
+                    # 分割键和值，只分割一次
+                    parts = clean_line.split(':', 1)
+                    if len(parts) > 1:
+                        # 提取值，并去除值两边的空白和可能的引号
+                        value = parts[1].strip().strip('\'"')
+                        return value
+    except Exception:
+        # 捕获任何可能的I/O错误
+        return "N/A"
+    # 如果循环结束还没找到，返回 "N/A"
+    return "N/A"
 
 def main():
     """主函数，运行整个交互式向导。"""
     print(styled("="*60, "header")); print(styled("   欢迎使用HTTP代理扫描向导 (法证级最终版)", "header")); print(styled("="*60, "header"))
-    print(styled("提示: 请确保已安装 Python 依赖: pip install requests pyyaml", "blue"))
+    print(styled("提示: 请确保已安装 Python 依赖: pip install requests", "blue"))
     
     go_cmd = find_go_executable();
     if not go_cmd: sys.exit(1)
@@ -313,13 +330,12 @@ def main():
     if use_chunking:
         lines_per_chunk = int(get_user_input("> 每个内存块包含多少行代理?", "5000"))
 
-    # --- 第三步: 密码本 (已更新) ---
+    # --- 第三步: 密码本 ---
     print(styled("\n--- 第三步: 密码本 ---", "blue"))
     cred_file = None
     temp_cred_file = None 
     if get_user_input("> 是否使用密码本? (yes/no)", "no").lower() == 'yes':
         original_cred_file = get_user_input("> 请输入密码本文件路径", "credentials.txt")
-        # 更新了示例文件内容，以反映新的处理逻辑
         create_example_file_if_not_exists(original_cred_file, """# 请在此处填入账号密码。程序会自动处理以下两种格式:
 #
 # 格式1: username:password (每行一个)
