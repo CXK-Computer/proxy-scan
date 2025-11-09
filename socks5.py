@@ -334,14 +334,33 @@ def compile_go_binaries():
                     source_path = os.path.join(temp_dir, f"{name}.go")
                     with open(source_path, "w", encoding="utf-8") as f: f.write(code)
                     cmd = [go_executable, "build", "-o", output_path, source_path]
-                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                    
+                    # --- 已修改部分 开始 ---
+                    # 复制当前环境变量，以防万一父环境没有HOME/USERPROFILE
+                    build_env = os.environ.copy()
+                    if "HOME" not in build_env and "USERPROFILE" not in build_env:
+                        # 为Go编译器指定一个临时的GOCACHE目录
+                        go_cache_path = os.path.join(temp_dir, "gocache_for_build")
+                        os.makedirs(go_cache_path, exist_ok=True)
+                        build_env["GOCACHE"] = go_cache_path
+                        print(f"  - 提示: 未找到HOME/USERPROFILE，已临时设置GOCACHE: {go_cache_path}")
+                    
+                    # 在执行subprocess时传入定义好的环境
+                    subprocess.run(cmd, check=True, capture_output=True, text=True, env=build_env)
+                    # --- 已修改部分 结束 ---
+                    
                     with open(hash_path, 'w') as f: f.write(current_hash)
                     print(f"  - '{name}' 编译完成。")
                 else:
                     print(f"  - 使用缓存的 '{name}'。")
                 COMPILED_BINARIES[name] = output_path
         print("Go核心程序准备就绪。"); return True
-    except subprocess.CalledProcessError as e: print(f"\nGo程序编译失败: {e.stderr}"); return False
+    except subprocess.CalledProcessError as e:
+        error_message = f"\nGo程序编译失败: {e.stderr}"
+        if "cannot find main module" in e.stderr or "go.mod file not found" in e.stderr:
+            error_message += "\n[错误原因分析]: 这通常是因为Go编译器无法确定工作目录。可能与运行环境缺少'HOME'或'USERPROFILE'环境变量有关。\n本脚本已尝试自动处理此问题，但似乎仍旧失败。请检查Go语言环境安装是否完整。"
+        print(error_message)
+        return False
     except Exception as e: print(f"\n发生未知错误: {e}"); return False
 
 def run_go_executable(executable_name, args_list, pbar_desc="已找到"):
