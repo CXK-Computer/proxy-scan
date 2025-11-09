@@ -179,7 +179,7 @@ func main() {
 			defer workerWg.Done()
 			verifyProxyConnectivity(t, time.Duration(*timeout)*time.Second, results)
 			<-sem
-		}(t)
+		}(target)
 	}
 	workerWg.Wait(); close(results); writerWg.Wait()
 
@@ -244,7 +244,6 @@ CONFIG_FILE = "config.json"
 # --- 配置管理 ---
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        # 如果配置文件不存在，创建一个默认的
         default_config = {"bot_token": "", "chat_id": "", "custom_id_key": "VPS", "custom_id_value": ""}
         save_config(default_config)
         return default_config
@@ -335,19 +334,14 @@ def compile_go_binaries():
                     with open(source_path, "w", encoding="utf-8") as f: f.write(code)
                     cmd = [go_executable, "build", "-o", output_path, source_path]
                     
-                    # --- 已修改部分 开始 ---
-                    # 复制当前环境变量，以防万一父环境没有HOME/USERPROFILE
                     build_env = os.environ.copy()
                     if "HOME" not in build_env and "USERPROFILE" not in build_env:
-                        # 为Go编译器指定一个临时的GOCACHE目录
                         go_cache_path = os.path.join(temp_dir, "gocache_for_build")
                         os.makedirs(go_cache_path, exist_ok=True)
                         build_env["GOCACHE"] = go_cache_path
-                        print(f"  - 提示: 未找到HOME/USERPROFILE，已临时设置GOCACHE: {go_cache_path}")
+                        print(f"  - 提示: 未找到HOME/USERPROFILE, 已临时设置GOCACHE: {go_cache_path}")
                     
-                    # 在执行subprocess时传入定义好的环境
                     subprocess.run(cmd, check=True, capture_output=True, text=True, env=build_env)
-                    # --- 已修改部分 结束 ---
                     
                     with open(hash_path, 'w') as f: f.write(current_hash)
                     print(f"  - '{name}' 编译完成。")
@@ -387,7 +381,6 @@ def run_go_executable(executable_name, args_list, pbar_desc="已找到"):
             print("--- 任务执行完毕 ---")
     except Exception as e: print(f"执行Go程序时出错: {e}")
 
-# --- Telegram 发送与任务处理 ---
 def format_duration(seconds):
     secs = int(seconds)
     mins, secs = divmod(secs, 60)
@@ -397,8 +390,6 @@ def send_telegram_notification(config, file_path, total_targets, duration_second
     token = config.get("bot_token")
     chat_id = config.get("chat_id")
     
-    # 从原始文件名派生新文件名
-    original_basename = os.path.basename(file_path)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M")
     new_filename = f"Socks5-{timestamp}.txt"
     
@@ -432,9 +423,10 @@ def send_telegram_notification(config, file_path, total_targets, duration_second
         print(f"发生未知错误: {e}")
 
 def prompt_and_send_telegram(config, file_path, total_targets, duration_seconds):
-    if not os.path.exists(file_path) or total_targets == 0: return
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        print("\n结果文件为空，无需发送。")
+        return
     
-    # 检查配置
     if not config.get("bot_token") or not config.get("chat_id"):
         print("\n[!] Telegram 未配置。请在主菜单 -> [3] 设置 中配置 Bot Token 和 Chat ID 后再发送。")
         return
@@ -446,38 +438,27 @@ def prompt_and_send_telegram(config, file_path, total_targets, duration_seconds)
 def execute_scan_task(config, output_dir, mode):
     task_map = {
         "protocol": {
-            "header": "验证Socks5协议 (快速)",
-            "desc": "此模式只检查目标是否响应SOCKS5握手，不测试其可用性。",
-            "threads_prompt": "并发数 (默认500): ", "threads_default": "500",
-            "timeout_prompt": "超时(秒, 推荐5): ", "timeout_default": "5",
-            "output_suffix": "_protocol_verified",
-            "executable": "protocol_verifier",
-            "pbar_desc": "SOCKS5协议确认"
+            "header": "验证Socks5协议 (快速)", "desc": "此模式只检查目标是否响应SOCKS5握手，不测试其可用性。",
+            "threads_prompt": "并发数 (默认500): ", "threads_default": "500", "timeout_prompt": "超时(秒, 推荐5): ", "timeout_default": "5",
+            "output_suffix": "_protocol_verified", "executable": "protocol_verifier", "pbar_desc": "SOCKS5协议确认"
         },
         "deep": {
-            "header": "扫描公共代理 (无认证)",
-            "desc": "此功能将深度验证代理，确保其不仅是SOCKS5服务，还能实际连接到目标网站。",
-            "threads_prompt": "并发数 (默认200): ", "threads_default": "200",
-            "timeout_prompt": "超时(秒, 推荐10): ", "timeout_default": "10",
-            "output_suffix": "_deep_verified",
-            "executable": "deep_verifier",
-            "pbar_desc": "可用公共代理"
+            "header": "扫描公共代理 (无认证)", "desc": "此功能将深度验证代理，确保其不仅是SOCKS5服务，还能实际连接到目标网站。",
+            "threads_prompt": "并发数 (默认200): ", "threads_default": "200", "timeout_prompt": "超时(秒, 推荐10): ", "timeout_default": "10",
+            "output_suffix": "_deep_verified", "executable": "deep_verifier", "pbar_desc": "可用公共代理"
         }
     }
     task = task_map[mode]
-    print_header(task["header"])
-    print(task["desc"])
+    print_header(task["header"]); print(task["desc"])
     
     input_file = get_validated_input("请输入原始目标文件路径: ", validate_file_exists, "文件不存在。")
     
     try:
         with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
             total_targets = sum(1 for line in f if line.strip())
-    except Exception as e:
-        print(f"读取文件时出错: {e}"); return
+    except Exception as e: print(f"读取文件时出错: {e}"); return
         
-    if total_targets == 0:
-        print("输入文件为空，任务取消。"); return
+    if total_targets == 0: print("输入文件为空，任务取消。"); return
 
     threads = get_validated_input(task["threads_prompt"], lambda x: x=="" or validate_positive_integer(x), "") or task["threads_default"]
     timeout = get_validated_input(task["timeout_prompt"], lambda x: x=="" or validate_positive_integer(x), "") or task["timeout_default"]
@@ -510,16 +491,13 @@ def handle_auth_scan():
 def handle_discover_usability(config, output_dir):
     while True:
         print_header("发现可用Socks5 (深度)")
-        print("  [1] 扫描公共代理 (无认证)")
-        print("  [2] 扫描私有代理 (需密码本)")
-        print("  [b] 返回主菜单")
+        print("  [1] 扫描公共代理 (无认证)"); print("  [2] 扫描私有代理 (需密码本)"); print("  [b] 返回主菜单")
         choice = input("\n请选择扫描类型: ").lower()
         if choice == '1': execute_scan_task(config, output_dir, "deep"); break
         elif choice == '2': handle_auth_scan(); break
         elif choice == 'b': break
         else: print("无效输入，请重新选择。")
 
-# --- 主程序入口 ---
 def main():
     if not compile_go_binaries(): sys.exit(1)
     
@@ -528,31 +506,18 @@ def main():
     output_dir = f"toolkit_session_{session_timestamp}"
     os.makedirs(output_dir, exist_ok=True)
     
-    print("\n" + "*"*60)
-    print(" " * 15 + "SOCKS5 验证与发现工具 (配置版)")
-    print(f"--- 本次会话所有输出文件将保存在: '{output_dir}' 目录 ---")
-    print(f"--- 配置文件: '{CONFIG_FILE}', Go核心缓存: '{CACHE_DIR}' ---")
-    print("*"*60)
+    print("\n" + "*"*60); print(" " * 15 + "SOCKS5 验证与发现工具 (配置版)"); print(f"--- 本次会话所有输出文件将保存在: '{output_dir}' 目录 ---")
+    print(f"--- 配置文件: '{CONFIG_FILE}', Go核心缓存: '{CACHE_DIR}' ---"); print("*"*60)
 
     while True:
         print("\n--- 主菜单 ---")
-        print("  [1] 验证Socks5协议 (快速初筛)")
-        print("  [2] 发现可用Socks5 (深度验证)")
-        print("  [3] 设置")
-        print("  [4] 退出程序")
+        print("  [1] 验证Socks5协议 (快速初筛)"); print("  [2] 发现可用Socks5 (深度验证)"); print("  [3] 设置"); print("  [4] 退出程序")
         choice = input("\n请输入您的选择 [1-4]: ")
-
-        if choice == '1':
-            execute_scan_task(config, output_dir, "protocol")
-        elif choice == '2':
-            handle_discover_usability(config, output_dir)
-        elif choice == '3':
-            handle_config_menu(config)
-        elif choice == '4':
-            print("感谢使用，再见！")
-            break
-        else:
-            print("无效的输入。")
+        if choice == '1': execute_scan_task(config, output_dir, "protocol")
+        elif choice == '2': handle_discover_usability(config, output_dir)
+        elif choice == '3': handle_config_menu(config)
+        elif choice == '4': print("感谢使用，再见！"); break
+        else: print("无效的输入。")
         input("\n按 Enter 键返回主菜单...")
 
 if __name__ == "__main__":
