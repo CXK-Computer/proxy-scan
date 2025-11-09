@@ -8,6 +8,9 @@ import json
 import time
 from datetime import datetime
 import getpass
+import threading
+
+
 
 # --- 依赖检查 ---
 try:
@@ -449,32 +452,75 @@ def compile_go_binaries():
         print("Go核心程序准备就绪。"); return True
     except Exception as e: print(f"\n发生未知错误: {e}"); return False
 
-def run_go_executable(executable_name, args_list):
+
+# ... (脚本的其他部分保持不变) ...
+
+def run_go_executable(executable_name, args_list, pbar_desc="已找到"):
     executable_path = COMPILED_BINARIES.get(executable_name)
-    if not executable_path: print(f"错误: 未找到 '{executable_name}' 程序。"); return
+    if not executable_path:
+        print(f"错误: 未找到 '{executable_name}' 程序。")
+        return
+
     try:
         cmd = [executable_path] + args_list
-        print("\n--- 正在执行 Go 高性能核心 ---")
+        print("\n--- 正在执行 Go 高性能核心 (健壮模式) ---")
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding='utf-8', errors='replace'
         )
 
-        # Unified handling for stdout and stderr to prevent blocking
-        # And provide real-time feedback
-        for line in iter(process.stdout.readline, ''):
-             print(line.strip())
+        # 为 stdout 和 stderr 创建独立的读取线程，防止死锁
+        def reader_thread(pipe, output_list, pbar=None):
+            try:
+                for line in iter(pipe.readline, ''):
+                    if line:
+                        output_list.append(line)
+                        if pbar:
+                            # 只有主输出才更新进度条
+                            pbar.update(1)
+                        else:
+                            # 错误流直接打印
+                            print(line.strip(), file=sys.stderr)
+            finally:
+                pipe.close()
+        
+        stdout_output = []
+        stderr_output = []
 
-        process.wait() # Wait for the process to finish
-        stderr_output = process.stderr.read()
-        if stderr_output:
-             print(f"--- Go 核心日志 ---\n{stderr_output.strip()}")
+        if "verifier" in executable_name:
+            with tqdm(desc=pbar_desc, unit=" 个", dynamic_ncols=True) as pbar:
+                stdout_thread = threading.Thread(target=reader_thread, args=(process.stdout, stdout_output, pbar))
+                stderr_thread = threading.Thread(target=reader_thread, args=(process.stderr, stderr_output, None))
+                
+                stdout_thread.start()
+                stderr_thread.start()
+                
+                stdout_thread.join() # 等待线程结束
+                stderr_thread.join()
+        else: # 认证扫描器模式，直接打印
+            def print_pipe(pipe):
+                try:
+                    for line in iter(pipe.readline, ''):
+                        print(line.strip())
+                finally:
+                    pipe.close()
 
-        print("--- 任务执行完毕 ---")
+            stdout_thread = threading.Thread(target=print_pipe, args=(process.stdout,))
+            stderr_thread = threading.Thread(target=print_pipe, args=(process.stderr,))
+            stdout_thread.start()
+            stderr_thread.start()
+            stdout_thread.join()
+            stderr_thread.join()
 
-    except Exception as e: print(f"执行Go程序时出错: {e}")
+        process.wait() # 确保子进程完全退出
 
-# --- 认证扫描辅助函数 ---
+        if "verifier" in executable_name:
+            print("\n--- 任务执行完毕 ---")
+            
+    except Exception as e:
+        print(f"执行Go程序时出错: {e}")
+
+
 def create_dict_from_user_pass_files(temp_dir):
     print_header("模式: username.txt + password.txt")
     user_file = get_validated_input("请输入用户名文件 (username.txt): ", validate_file_exists, "文件不存在。")
